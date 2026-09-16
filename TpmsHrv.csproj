@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!--
+      PicoGK's NuGet package (both the 1.7.x and 2.x lines) targets net9.0 only.
+      The original session spec called for .NET 8; that guidance is stale against
+      the current PicoGK release and has been superseded by this measurement.
+    -->
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TpmsHrv</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PicoGK" Version="2.3.0" />
+  </ItemGroup>
+
+</Project>
