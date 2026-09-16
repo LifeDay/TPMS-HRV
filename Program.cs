@@ -110,6 +110,7 @@ static void RunSession(Library oLib, string strObjPath, string strOutDir)
     Console.WriteLine($"[Checkpoint 5] wrote {oSlabByGroup.Count} port slab STL(s) to {strOutDir}");
 
     // ---- Task 6: position assertion ----
+    var oFaceByGroup = new Dictionary<ObjGroup, EFace>();
     foreach (ObjGroup g in oGroups)
     {
         EPort ePort = oPortByGroup[g];
@@ -118,6 +119,7 @@ static void RunSession(Library oLib, string strObjPath, string strOutDir)
 
         Vector3 vecCentroid = ObjImporter.vecCentroid(g);
         EFace eFace = PortAssertion.eClassifyFace(vecCentroid, oBBoxVolume);
+        oFaceByGroup[g] = eFace;
         PortAssertion.AssertPlacement(g.strName, ePort, eFace);
     }
     Console.WriteLine("[Checkpoint 6] all colored ports sit on their expected face - OK");
@@ -128,9 +130,17 @@ static void RunSession(Library oLib, string strObjPath, string strOutDir)
     Voxels voxStreamA = voxVolume.voxIntersectImplicit(new GyroidStreamAImplicit(oRawGyroid, Params.fWallThicknessMM));
     Voxels voxStreamB = voxVolume.voxIntersectImplicit(new GyroidStreamBImplicit(oRawGyroid, Params.fWallThicknessMM));
 
-    // Stub pairing only - which physical stream flows through which face is a
-    // later-session design decision. Here Supply* seals stream B at its port,
-    // Exhaust* seals stream A, just to prove the boolean chain end-to-end.
+    // Supply* <-> stream A, Exhaust* <-> stream B. Which of the raw gyroid's
+    // two labyrinths (A or B) gets called "supply" is a free choice - the raw
+    // field obeys d(-p) = -d(p) (see GyroidRawImplicit), a point-inversion
+    // symmetry that swaps A<->B while also swapping PlusX<->MinusX and
+    // PlusZ<->MinusZ, so flipping the assignment just yields a mirrored,
+    // equally-valid core. That symmetry does NOT guarantee a port actually
+    // has open area for its assigned stream, though - that depends on the
+    // gyroid's phase relative to where the port sits, which is meaningless to
+    // check on these fixtures (each "port" is a whole cube face) but becomes
+    // the real constraint once the real ERV volume's small port bores are in
+    // play. Checkpoint 7b below is a standing survey for that.
     foreach ((ObjGroup g, Voxels voxSlab) in oSlabByGroup)
     {
         EPort ePort = oPortByGroup[g];
@@ -140,6 +150,36 @@ static void RunSession(Library oLib, string strObjPath, string strOutDir)
 
     voxMembrane.mshAsMesh().SaveToStlFile(Path.Combine(strOutDir, "membrane.stl"));
     Console.WriteLine($"[Checkpoint 7] wrote membrane.stl to {strOutDir}");
+
+    // ---- Task 7b: survey each port face for its assigned stream's open area ----
+    // Samples the raw field on a grid across each port's face plane and
+    // reports what fraction is stream A / stream B / membrane. On these test
+    // cubes every face gets a healthy mix of both by construction (the whole
+    // face is the "port"), so this always passes here - its job is to be the
+    // check that actually bites once ports are small bores on the real
+    // volume and gyroid phase can leave one sitting entirely on membrane.
+    float fHalfThicknessMM = 0.5f * Params.fWallThicknessMM;
+    foreach (ObjGroup g in oGroups)
+    {
+        EPort ePort = oPortByGroup[g];
+        if (ePort == EPort.None)
+            continue;
+
+        EFace eFace = oFaceByGroup[g];
+        (float fFracA, float fFracB, float fFracMembrane) = oSurveyGyroidAtFace(
+            eFace, oBBoxVolume, oRawGyroid, fHalfThicknessMM, Params.fVoxelSizeMM * 2f, 64);
+
+        float fFracOpen = (ePort is EPort.SupplyIn or EPort.SupplyOut) ? fFracA : fFracB;
+        Console.WriteLine($"  {g.strName,-45} face={eFace,-7} openStream={fFracOpen * 100f:F1}%  membrane={fFracMembrane * 100f:F1}%");
+
+        if (fFracOpen < 0.05f)
+        {
+            throw new Exception(
+                $"{g.strName}: assigned stream has only {fFracOpen * 100f:F1}% open area at {eFace} " +
+                "- gyroid phase is misaligned with this port.");
+        }
+    }
+    Console.WriteLine("[Checkpoint 7b] every port's assigned stream has adequate open area at its face - OK");
 }
 
 static string strSanitize(string strName)
@@ -148,3 +188,49 @@ static string strSanitize(string strName)
         strName = strName.Replace(c, '_');
     return strName;
 }
+
+/// <summary>
+/// Samples the raw gyroid field on an nGridSteps x nGridSteps grid across one
+/// face of oBBox (inset fInsetMM from the boundary so samples land inside the
+/// solid rather than exactly on it) and returns the fraction of samples that
+/// fall on stream A's side, stream B's side, and the membrane band.
+/// </summary>
+static (float fFracA, float fFracB, float fFracMembrane) oSurveyGyroidAtFace(
+    EFace eFace, BBox3 oBBox, GyroidRawImplicit oRaw, float fHalfThicknessMM,
+    float fInsetMM, int nGridSteps)
+{
+    Vector3 vecMin = oBBox.vecMin, vecMax = oBBox.vecMax;
+    int nA = 0, nB = 0, nMembrane = 0;
+
+    for (int i = 0; i < nGridSteps; i++)
+    {
+        float fU = (i + 0.5f) / nGridSteps;
+        for (int j = 0; j < nGridSteps; j++)
+        {
+            float fV = (j + 0.5f) / nGridSteps;
+            Vector3 vec = eFace switch
+            {
+                EFace.PlusX  => new Vector3(vecMax.X - fInsetMM, fLerp(vecMin.Y, vecMax.Y, fU), fLerp(vecMin.Z, vecMax.Z, fV)),
+                EFace.MinusX => new Vector3(vecMin.X + fInsetMM, fLerp(vecMin.Y, vecMax.Y, fU), fLerp(vecMin.Z, vecMax.Z, fV)),
+                EFace.PlusY  => new Vector3(fLerp(vecMin.X, vecMax.X, fU), vecMax.Y - fInsetMM, fLerp(vecMin.Z, vecMax.Z, fV)),
+                EFace.MinusY => new Vector3(fLerp(vecMin.X, vecMax.X, fU), vecMin.Y + fInsetMM, fLerp(vecMin.Z, vecMax.Z, fV)),
+                EFace.PlusZ  => new Vector3(fLerp(vecMin.X, vecMax.X, fU), fLerp(vecMin.Y, vecMax.Y, fV), vecMax.Z - fInsetMM),
+                EFace.MinusZ => new Vector3(fLerp(vecMin.X, vecMax.X, fU), fLerp(vecMin.Y, vecMax.Y, fV), vecMin.Z + fInsetMM),
+                _ => throw new ArgumentOutOfRangeException(nameof(eFace)),
+            };
+
+            float d = oRaw.d(vec);
+            if (d > fHalfThicknessMM)
+                nA++;
+            else if (d < -fHalfThicknessMM)
+                nB++;
+            else
+                nMembrane++;
+        }
+    }
+
+    int nTotal = nGridSteps * nGridSteps;
+    return ((float)nA / nTotal, (float)nB / nTotal, (float)nMembrane / nTotal);
+}
+
+static float fLerp(float a, float b, float t) => a + (b - a) * t;
