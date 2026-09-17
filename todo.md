@@ -31,6 +31,14 @@ platform for now; the spec's headless/Linux path is out of scope.
 | 100mm cube | meshing | 10.3 min | 8.96GB |
 | 100mm cube | write STL | 1.1 min | — |
 | real volume | voxel stages + checks | ~20 min | ~11GB working set, 18GB+ committed |
+| real volume @ 0.25mm | voxel stages + checks | 2.5 min | 2.48GB |
+| real volume @ 0.25mm | meshing | 7.9 min | 8.05GB |
+| real volume @ 0.25mm | write STL | 1.2 min | — |
+
+- Real volume at 0.25mm **does fit**: 94M triangles, **4.7GB STL** (about
+  the same size as the cube at 0.15mm). Wall 0.801 ± 0.002mm. So 0.25mm is a
+  working whole-part fallback, but the STL is still big enough that most
+  slicers will struggle — a smaller voxel size alone doesn't fix output size.
 
 - Cube: 95M triangles, **4.7GB STL** (437MB at 0.5mm). As a VDB grid it's
   about 15× smaller than the STL (29MB vs 437MB at 0.5mm).
@@ -87,6 +95,11 @@ platform for now; the spec's headless/Linux path is out of scope.
   `bRayCastToSurface` is biased about −0.11mm at 0.15mm. Any measurement uses
   `TrilinearSdf` instead. `vecClosestPointOnSurface` is slower on bigger grids
   (it made Checkpoint 9 take 15 min at 0.15mm), so keep it out of loops.
+- **Don't voxelize meshes with internal walls if anything reads the distance
+  field.** Per-triangle prisms gave the right inside/outside but bad distances,
+  so `Offset(-t)` eroded the real part's skin cut-outs from the inside (23%
+  of the port surface still skinned at 0.25mm, fine at 0.5/0.15 by luck).
+  `SlabBuilder` now extrudes each group as one closed prism.
 - **Free PicoGK grids explicitly.** They live in native memory the GC can't
   see.
 
