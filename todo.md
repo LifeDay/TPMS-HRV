@@ -1,9 +1,13 @@
 # TPMS-HRV — remaining work
 
-Status: Sessions 1–2 done. The pipeline (importer, port seals, normalized
-gyroid, skin, wall-thickness check; Checkpoints 0–9) runs end-to-end at 0.5mm
-on both cube fixtures and the real HRV volume. At 0.15mm, only the 100mm cube
-fits in memory. This file tracks what's left; completed work and
+Status: Sessions 1–2 done; Session 3 output format done. The pipeline
+(importer, port seals, normalized gyroid, skin, wall-thickness check,
+decimated STL/3MF export; Checkpoints 0–10) runs end-to-end at 0.5mm on both
+cube fixtures and the real HRV volume, and on the real volume at 0.25mm. At
+0.15mm, only the 100mm cube fits in memory.
+
+Target: Bambu Studio, printed in one piece on a Bambu H2C (the real
+volume is 232 × 131 × 140mm). This file tracks what's left; completed work and
 its rationale live in the commit messages. Windows is the only supported build
 platform for now; the spec's headless/Linux path is out of scope.
 
@@ -35,10 +39,9 @@ platform for now; the spec's headless/Linux path is out of scope.
 | real volume @ 0.25mm | meshing | 7.9 min | 8.05GB |
 | real volume @ 0.25mm | write STL | 1.2 min | — |
 
-- Real volume at 0.25mm **does fit**: 94M triangles, **4.7GB STL** (about
-  the same size as the cube at 0.15mm). Wall 0.801 ± 0.002mm. So 0.25mm is a
-  working whole-part fallback, but the STL is still big enough that most
-  slicers will struggle — a smaller voxel size alone doesn't fix output size.
+- Real volume at 0.25mm **does fit**: 94M triangles, **4.7GB STL** raw
+  (about the same size as the cube at 0.15mm). Wall 0.801 ± 0.002mm. A coarser
+  voxel size alone doesn't fix output size; decimation does (Session 3).
 
 - Cube: 95M triangles, **4.7GB STL** (437MB at 0.5mm). As a VDB grid it's
   about 15× smaller than the STL (29MB vs 437MB at 0.5mm).
@@ -48,18 +51,38 @@ platform for now; the spec's headless/Linux path is out of scope.
   be ~12GB. Whole-part production output isn't viable on this machine, so
   Session 3's tiling is what makes 0.15mm possible, not an optimization.
 
-## Session 3 — Modularization
+## Session 3 — Printable output at production resolution
 
-- [ ] 100mm module tiling with seam lip and gasket groove so a 200mm core
-      becomes eight prints.
-- [ ] Tile size: a 100mm cube at 0.15mm peaks at 9GB with STL export, so
-      100mm is the upper limit on this machine. Render each tile's implicit
-      separately. `voxIntersectImplicit` currently renders the gyroid over the
-      whole part's bbox at once.
-- [ ] Output format per tile: STL is ~4.7GB per 100mm tile. Options: keep
-      `.vdb` as the archived output and mesh on demand, write 3MF (indexed +
-      zipped), or decimate (voxel meshes of smooth TPMS are heavily
-      over-tessellated). Check what the target slicer accepts before choosing.
+The core prints in one piece, so seam lips and gasket grooves are out.
+Tiling survives only as a way to fit 0.15mm in RAM.
+
+- [x] Output format: decimate, then write 3MF (`--export 3mf`,
+      `--decimate <mm>`, default 0.02). `MeshDecimator.cs`: quadric
+      edge-collapse to an area-weighted RMS tolerance, run in parallel on 30mm
+      chunks with chunk-shared vertices locked, then a second pass on a
+      half-shifted grid to clean up the seams. Checkpoint 10 fails on open,
+      non-manifold, or degenerate edges and on inward winding, and reports
+      surface deviation against the core's trilinear SDF.
+
+      | real volume | triangles | STL | 3MF | deviation mean / p99 / max |
+      |---|---|---|---|---|
+      | 0.25mm raw | 94.0M | 4.7GB | — | 0.003 / 0.016 / 0.093mm |
+      | 0.25mm, 0.02 tol | 11.1M | 556MB | **137MB** | 0.014 / 0.041 / 0.127mm |
+      | 0.5mm, 0.02 tol | 11.5M | — | 131MB | 0.018 / 0.061 / 0.214mm |
+
+      Decimation takes ~70s at 0.25mm and changes volume by <0.03%. The
+      decimated size barely depends on voxel size (same ~11M triangles at 0.5
+      and 0.25), so 0.15mm output should be about the same size again;
+      only meshing RAM is the limit.
+- [ ] **Open `out/real_hrv_volume/core.3mf` (0.25mm) in Bambu Studio** and
+      check it loads, slices, and at what speed. That decides whether the 0.02mm
+      default tolerance needs loosening.
+- [ ] 0.15mm on the real volume: meshing needs ~23GB at once. Options: mesh
+      the core in overlapping slabs and decimate each before the next (the
+      decimator already locks seam vertices, so pieces can be stitched), or
+      run on a machine with ≥32GB. Render the implicit per slab too —
+      `voxIntersectImplicit` currently renders the gyroid over the whole
+      part's bbox at once.
 
 ## Session 4 — Parameter sweep
 
@@ -100,6 +123,9 @@ platform for now; the spec's headless/Linux path is out of scope.
   so `Offset(-t)` eroded the real part's skin cut-outs from the inside (23%
   of the port surface still skinned at 0.25mm, fine at 0.5/0.15 by luck).
   `SlabBuilder` now extrudes each group as one closed prism.
+- **Voxel-count volume ≠ mesh volume on thin walls.** `CalculateProperties`
+  differs from the meshed volume by ±1% on the core (+1.1% at 0.5mm, −1.1%
+  at 0.25mm). Compare mesh volumes to each other, not to the voxel count.
 - **Free PicoGK grids explicitly.** They live in native memory the GC can't
   see.
 

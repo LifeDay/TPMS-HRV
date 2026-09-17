@@ -4,10 +4,11 @@ using System.Numerics;
 using PicoGK;
 using TpmsHrv;
 
-// Usage: dotnet run -c Release -- [--voxel <mm>] [--only <name>]... [--export stl|vdb|none]
+// Usage: dotnet run -c Release -- [--voxel <mm>] [--only <name>]... [--export stl|3mf|vdb|none] [--decimate <mm>]
 //   --voxel   voxel size in mm (default Params.fVoxelSizeMM; production is 0.15)
 //   --only    run only parts whose OBJ path contains <name> (repeatable)
-//   --export  core output format; stl (default) or vdb, or none to skip it
+//   --export  core output format: stl (default), 3mf, vdb, or none to skip it
+//   --decimate  stl/3mf surface tolerance in mm (default 0.02); 0 keeps the raw voxel mesh
 Options oOpts = Options.oParse(args);
 
 // Headless Library (no viewer, no blocking on a window close) - checkpoints
@@ -258,18 +259,51 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
     string strCorePath = oOpts.strExport switch
     {
         "stl"  => Path.Combine(strOutDir, "core.stl"),
+        "3mf"  => Path.Combine(strOutDir, "core.3mf"),
         "vdb"  => Path.Combine(strOutDir, "core.vdb"),
         _      => "",
     };
 
-    if (oOpts.strExport == "stl")
+    if (oOpts.strExport is "stl" or "3mf")
     {
+        // The deviation check samples the core's SDF, which outlives the grid.
+        using TrilinearSdf? oCoreSdf = oOpts.fDecimateMM > 0 ? new TrilinearSdf(oLib, voxCore) : null;
+
         // The mesh is several times the grid's size, so free the grid first.
-        using Mesh mshCore = voxCore.mshAsMesh();
-        voxCore.Dispose();
-        oTimer.Mark("mesh");
-        Console.WriteLine($"  core mesh: {mshCore.nTriangleCount()} triangles, {mshCore.nVertexCount()} vertices");
-        mshCore.SaveToStlFile(strCorePath);
+        IndexedMesh oMesh;
+        using (Mesh mshCore = voxCore.mshAsMesh())
+        {
+            voxCore.Dispose();
+            oTimer.Mark("mesh");
+            oMesh = IndexedMesh.oFromPicoGK(mshCore);
+        }
+        Console.WriteLine($"  core mesh: {oMesh.nTriangles} triangles, {oMesh.nVertices} vertices");
+
+        if (oCoreSdf != null)
+        {
+            RunSurfaceDeviation("voxel mesh", oMesh, oCoreSdf);
+            int nBefore = oMesh.nTriangles;
+            double dRawVolume = oMesh.dSignedVolume();
+            MeshDecimator.Decimate(oMesh, oOpts.fDecimateMM, fChunkMM: 30f, nThreads: Math.Max(1, Environment.ProcessorCount / 2));
+            oTimer.Mark("decimate");
+            Console.WriteLine($"[Checkpoint 10] decimated to {oOpts.fDecimateMM}mm: {oMesh.nTriangles} triangles " +
+                              $"({100.0 * oMesh.nTriangles / nBefore:F1}% of {nBefore}), {oMesh.nVertices} vertices");
+            (long nEdges, long nOpen, long nNonManifold, long nDegenerate) = oMesh.oTopologyCheck();
+            Console.WriteLine($"  topology: {nEdges} edges, {nOpen} open, {nNonManifold} non-manifold, {nDegenerate} degenerate triangles");
+            double dMeshVolume = oMesh.dSignedVolume();
+            Console.WriteLine($"  mesh volume: {dMeshVolume:F0} mm^3 ({100 * (dMeshVolume / dRawVolume - 1):+0.000;-0.000}% vs voxel mesh, " +
+                              $"{100 * (dMeshVolume / fCoreVolumeMM3 - 1):+0.00;-0.00}% vs voxel count)");
+            if (nOpen > 0 || nNonManifold > 0 || nDegenerate > 0)
+                throw new Exception("decimated mesh isn't a closed manifold");
+            if (dMeshVolume <= 0)
+                throw new Exception("decimated mesh winds inward");
+            RunSurfaceDeviation("decimated", oMesh, oCoreSdf);
+        }
+
+        if (oOpts.strExport == "3mf")
+            oMesh.SaveTo3mf(strCorePath);
+        else
+            oMesh.SaveToStl(strCorePath);
     }
     else
     {
@@ -425,6 +459,37 @@ static void RunWallThicknessCheck(Library oLib, GyroidField oField, Voxels voxCo
         throw new Exception($"voxel wall thickness off nominal (mean err {fVoxelMeanErr:F3}mm, worst {fVoxelWorst:F3}mm)");
 }
 
+/// <summary>
+/// Distance from the mesh to the core's voxel surface, sampled at triangle
+/// centroids and edge midpoints (where flat triangles cut across a curved
+/// surface) of a random subset of triangles.
+/// </summary>
+static void RunSurfaceDeviation(string strLabel, IndexedMesh oMesh, TrilinearSdf oSdf)
+{
+    const int nTriSamples = 200_000;
+    var oRand = new Random(4321);
+    var afDev = new List<float>(4 * nTriSamples);
+    Span<Vector3> avecPts = stackalloc Vector3[4];
+    for (int i = 0; i < nTriSamples; i++)
+    {
+        int t = oRand.Next(oMesh.nTriangles);
+        Vector3 a = oMesh.vecVertex(oMesh.anTris[3 * t]);
+        Vector3 b = oMesh.vecVertex(oMesh.anTris[3 * t + 1]);
+        Vector3 c = oMesh.vecVertex(oMesh.anTris[3 * t + 2]);
+        avecPts[0] = (a + b + c) / 3f;
+        avecPts[1] = 0.5f * (a + b);
+        avecPts[2] = 0.5f * (b + c);
+        avecPts[3] = 0.5f * (c + a);
+        foreach (Vector3 vec in avecPts)
+            afDev.Add(MathF.Abs(oSdf.fValue(vec)));
+    }
+
+    afDev.Sort();
+    float fPct(double d) => afDev[(int)Math.Min(afDev.Count - 1, d * afDev.Count)];
+    Console.WriteLine($"  surface deviation ({strLabel}, {afDev.Count} pts): mean {afDev.Average():F4}  " +
+                      $"p99 {fPct(0.99):F4}  p99.9 {fPct(0.999):F4}  max {afDev[^1]:F4} mm");
+}
+
 /// <summary>Largest t in [0, fMax] with bInside(t) still true, assuming bInside(0) and a single crossing.</summary>
 static float fBisect(Func<float, bool> bInside, float fMax)
 {
@@ -517,6 +582,7 @@ sealed class Options
     public float fVoxelSizeMM = Params.fVoxelSizeMM;
     public List<string> astrOnly = new();
     public string strExport = "stl";
+    public float fDecimateMM = 0.02f;
 
     public static Options oParse(string[] astrArgs)
     {
@@ -530,12 +596,13 @@ sealed class Options
                 case "--voxel":  o.fVoxelSizeMM = float.Parse(strNext(), CultureInfo.InvariantCulture); break;
                 case "--only":   o.astrOnly.Add(strNext()); break;
                 case "--export": o.strExport = strNext(); break;
+                case "--decimate": o.fDecimateMM = float.Parse(strNext(), CultureInfo.InvariantCulture); break;
                 default: throw new ArgumentException($"unknown argument {strArg}");
             }
         }
 
-        if (o.strExport is not ("stl" or "vdb" or "none"))
-            throw new ArgumentException($"--export must be stl, vdb or none (got {o.strExport})");
+        if (o.strExport is not ("stl" or "3mf" or "vdb" or "none"))
+            throw new ArgumentException($"--export must be stl, 3mf, vdb or none (got {o.strExport})");
         return o;
     }
 }
