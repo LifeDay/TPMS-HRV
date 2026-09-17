@@ -11,6 +11,7 @@ RunCheckpoint0(oLib);
 
 RunSession(oLib, "fixtures/test_cube_100mm.obj", "out/test_cube_100mm");
 RunSession(oLib, "fixtures/test_cube_filleted_100mm.obj", "out/test_cube_filleted_100mm");
+RunSession(oLib, "real-HRV-volume/real-HRV-volume.obj", "out/real_hrv_volume");
 
 Console.WriteLine("\nAll sessions complete.");
 
@@ -109,7 +110,12 @@ static void RunSession(Library oLib, string strObjPath, string strOutDir)
     }
     Console.WriteLine($"[Checkpoint 5] wrote {oSlabByGroup.Count} port slab STL(s) to {strOutDir}");
 
-    // ---- Task 6: position assertion ----
+    // ---- Task 6: classify each port to a face ----
+    // No longer asserts a fixed face-to-role table (e.g. "+X must be
+    // SupplyIn") - the real ERV enclosure has two ports sharing one face,
+    // which that model can't express. Checkpoint 7b's open-area survey is
+    // the check that actually validates stream/port wiring now; this step
+    // just picks which face each port sits on for that survey to sample.
     var oFaceByGroup = new Dictionary<ObjGroup, EFace>();
     foreach (ObjGroup g in oGroups)
     {
@@ -120,9 +126,9 @@ static void RunSession(Library oLib, string strObjPath, string strOutDir)
         Vector3 vecCentroid = ObjImporter.vecCentroid(g);
         EFace eFace = PortAssertion.eClassifyFace(vecCentroid, oBBoxVolume);
         oFaceByGroup[g] = eFace;
-        PortAssertion.AssertPlacement(g.strName, ePort, eFace);
+        Console.WriteLine($"  {g.strName,-45} role={ePort,-12} face={eFace}");
     }
-    Console.WriteLine("[Checkpoint 6] all colored ports sit on their expected face - OK");
+    Console.WriteLine($"[Checkpoint 6] classified {oFaceByGroup.Count} colored port(s) to a face");
 
     // ---- Task 7: stub gyroid + end-to-end boolean ----
     var oRawGyroid = new GyroidRawImplicit(Params.fCellSizeMM);

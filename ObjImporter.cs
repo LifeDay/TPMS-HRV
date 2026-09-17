@@ -48,8 +48,18 @@ public static class ObjImporter
             switch (aToken[0])
             {
                 case "mtllib":
-                    oMtlKd = oLoadMtl(Path.Combine(strDir, aToken[1]));
+                {
+                    // The mtllib token is Onshape's export-time filename, which
+                    // doesn't survive a human renaming the .obj/.mtl pair later
+                    // (exactly the "don't depend on exact Onshape export
+                    // filenames" trap, just showing up inside the file instead
+                    // of as the path argument). Fall back to <objname>.mtl.
+                    string strMtlPath = Path.Combine(strDir, aToken[1]);
+                    if (!File.Exists(strMtlPath))
+                        strMtlPath = Path.ChangeExtension(strObjPath, ".mtl");
+                    oMtlKd = oLoadMtl(strMtlPath);
                     break;
+                }
 
                 case "v":
                     avecVertex.Add(new Vector3(

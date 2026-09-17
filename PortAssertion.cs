@@ -6,23 +6,17 @@ namespace TpmsHrv;
 public enum EFace { PlusX, MinusX, PlusY, MinusY, PlusZ, MinusZ }
 
 /// <summary>
-/// Classifies each port group's centroid against the volume's bounding box
-/// and throws if the colored role doesn't match the face it actually sits
-/// on. Catches a plug assigned to the wrong stream - looks perfect in the
-/// viewer, prints fine over 60 hours, and is a dead short between supply
-/// and exhaust.
+/// Classifies each port group's centroid against the volume's bounding box.
+/// Used to pick which face to grid-sample in Checkpoint 7b's open-area
+/// survey - that's the check that actually catches a plug wired to the
+/// wrong stream now. (This used to also assert a fixed face-to-role table,
+/// e.g. +X must be SupplyIn; dropped once the real ERV enclosure showed two
+/// ports sharing one face, which that one-role-per-face model can't express.
+/// Revisit with a real placement rule once more real parts exist to
+/// generalize from.)
 /// </summary>
 public static class PortAssertion
 {
-    static readonly Dictionary<EFace, EPort> oExpectedRoleForFace = new()
-    {
-        [EFace.PlusX]  = EPort.SupplyIn,
-        [EFace.MinusX] = EPort.SupplyOut,
-        [EFace.PlusZ]  = EPort.ExhaustIn,
-        [EFace.MinusZ] = EPort.ExhaustOut,
-        // +Y / -Y intentionally absent: exterior skin, no port ever expected there.
-    };
-
     public static EFace eClassifyFace(Vector3 vecCentroid, BBox3 oBBox)
     {
         Vector3 vecCenter = oBBox.vecCenter();
@@ -40,18 +34,5 @@ public static class PortAssertion
             return vecRel.Y >= 0 ? EFace.PlusY : EFace.MinusY;
 
         return vecRel.Z >= 0 ? EFace.PlusZ : EFace.MinusZ;
-    }
-
-    /// <summary>Throws if a colored port group does not sit on its expected face.</summary>
-    public static void AssertPlacement(string strGroupName, EPort ePortFromColor, EFace eFace)
-    {
-        if (ePortFromColor == EPort.None)
-            return; // unpainted / exterior skin - no placement contract
-
-        if (!oExpectedRoleForFace.TryGetValue(eFace, out EPort eExpected) || eExpected != ePortFromColor)
-        {
-            throw new Exception(
-                $"{strGroupName}: colored {ePortFromColor}, sits on {eFace}");
-        }
     }
 }
