@@ -8,21 +8,26 @@ namespace TpmsHrv;
 /// from a port's face group. Overlapping prisms are fine - voxel booleans
 /// don't care about mesh topology between prisms, only that each prism is
 /// individually watertight.
+///
+/// Also used for the skin's port cut-outs, which need the prism to start
+/// outside the part (fOutwardMM) so eroding it doesn't pull its near cap
+/// back inside the surface.
 /// </summary>
 public static class SlabBuilder
 {
     const float fAreaEpsilon = 1e-9f;
 
-    public static Voxels voxSlabFromGroup(Library oLib, ObjGroup oGroup, float fDepthMM)
+    public static Voxels voxSlabFromGroup(Library oLib, ObjGroup oGroup, float fDepthMM, float fOutwardMM = 0f)
     {
         Vector3 vecAvgNormal = vecAreaWeightedAverageNormal(oGroup);
-        Vector3 vecExtrude = -vecAvgNormal * fDepthMM; // inward
+        Vector3 vecStart = vecAvgNormal * fOutwardMM;
+        Vector3 vecExtrude = -vecAvgNormal * (fDepthMM + fOutwardMM); // inward
 
         Mesh oMesh = new(oLib);
 
         foreach (Tri t in oGroup.oTris)
         {
-            Vector3 vecA = t.vecA, vecB = t.vecB, vecC = t.vecC;
+            Vector3 vecA = t.vecA + vecStart, vecB = t.vecB + vecStart, vecC = t.vecC + vecStart;
 
             Vector3 vecCross = Vector3.Cross(vecB - vecA, vecC - vecA);
             float fArea2 = vecCross.Length();

@@ -6,7 +6,7 @@ public static class Params
     public const float fCellSizeMM      = 8.0f;   // gyroid lambda
     public const float fWallThicknessMM = 0.8f;
     public const float fPortSealDepthMM = 6.0f;   // ~0.75 * lambda
-    public const float fSkinThicknessMM = 1.5f;   // unused this session
+    public const float fSkinThicknessMM = 1.5f;
 
     // RESOLVED (Task 2): the fixture OBJs carry "# ... Units = meters" in their
     // header comment, and the cube's vertices span +/-0.05 about the origin

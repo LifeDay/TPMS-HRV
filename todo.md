@@ -1,111 +1,57 @@
 # TPMS-HRV — remaining work
 
-Status: Session 1 (importer + stub gyroid) implemented, verified against both
-fixtures, committed as `eae0856`. This file tracks what's left.
-
-## Session 1 loose ends
-
-- [x] **Visually confirm the debug STLs** — no GUI slicer available in this
-      headless session, so instead wrote a numpy-stl + matplotlib renderer
-      (scratchpad, not committed) and eyeballed every debug STL for both
-      fixtures:
-      - `checkpoint0_sphere.stl` — clean r=25mm sphere, no artifacts.
-      - `group_*.stl` — rendered all 6 axis-aligned cube faces: +X=red
-        (SupplyIn), -X=orange (SupplyOut), +Z=blue (ExhaustIn), -Z=cyan
-        (ExhaustOut), ±Y=unpainted body. Matches fixture spec on both the
-        flat and filleted cube.
-      - `slab_*.stl` — each sits exactly on its assigned port face, correct
-        colors, both fixtures.
-      - `membrane.stl` — full-mesh view was too sparse to read (decimated
-        for render, 8.8M tris), so instead computed a true planar
-        triangle/plane intersection at z=0 (not just nearest-triangle
-        sampling) to get the actual cross-section contour: clean periodic
-        gyroid wave pattern, double-wall outline visible with the expected
-        (known, session-2-fix) uneven thickness from the un-normalized
-        stub field. No holes, no degenerate geometry, same on both fixtures.
-      Nothing looked wrong; no code changes needed from this pass.
-- [x] Decide whether to delete `test_cube_100mm.zip` / `test_cube_filleted_100mm.zip`
-      at repo root — deleted; fully redundant with `fixtures/*.obj`/`*.mtl`, which
-      are already committed and are what the code actually reads.
-- [x] Task 7's stream/port pairing (Supply*↔stream A, Exhaust*↔stream B) —
-      investigated. The A/B↔Supply/Exhaust assignment itself is provably a free
-      choice: the raw field obeys `d(-p) = -d(p)` (point inversion), which swaps
-      stream A↔B while also swapping PlusX↔MinusX and PlusZ↔MinusZ, so flipping
-      the assignment just mirrors the core — not a decision that needs "real"
-      fluid-routing info. What *does* need real info, and isn't decidable yet, is
-      whether a given port actually has open area for its assigned stream — that
-      depends on the gyroid's phase relative to where the port sits, which is
-      untestable on these fixtures (each "port" is an entire cube face, so every
-      face always has a healthy mix of both streams). Added a standing check for
-      this instead of a one-off decision: Checkpoint 7b in `Program.cs` grid-samples
-      the raw field across each port face and asserts the assigned stream has
-      ≥5% open area there. Passes trivially on both fixtures now; it's meant to
-      be the thing that catches a misphased gyroid once real small-bore ports
-      exist. **This is now the same blocker as the next item below** — real
-      resolution needs the real ERV volume, not more thinking about the stub.
-- [x] Run against the real HRV design volume (`real-HRV-volume/real-HRV-volume.obj`,
-      added by user this session — note the corrected name; earlier "ERV" was a
-      misnomer). Full pipeline now completes end-to-end (Checkpoints 0-7b all
-      pass); several real findings and fixes came out of it:
-      - **`ObjImporter.cs` mtllib fallback (fixed)**: the OBJ's internal `mtllib`
-        line pointed at Onshape's original export filename, which doesn't survive
-        a human renaming the `.obj`/`.mtl` pair afterward. Now falls back to
-        `<objname>.mtl` when the referenced file is missing - the same
-        exact-export-filename trap called out below, just showing up inside the
-        file instead of as the path argument.
-      - **Port palette mismatch (user fixed, not code)**: first export had
-        ExhaustIn painted pure blue `(0,0,1)` instead of the palette's
-        `(0.231,0.380,0.706)`, so it fell through to `None` and got silently
-        skipped (no slab, no stream, no placement info). Caught by rendering the
-        groups and noticing it geometrically mirrored SupplyIn on the same face
-        - strong evidence before the user even confirmed it. User re-painted and
-        re-exported; second run had all 4 ports on-palette.
-      - **`PortAssertion.cs` per-face role table removed**: it hardcoded one
-        port per cardinal face (`+X=SupplyIn` etc.), reverse-engineered from the
-        synthetic cube fixtures. The real enclosure puts SupplyIn *and* ExhaustIn
-        on the same `+Y` face (mirrored pair) - a layout that model can't
-        express. Per user decision, dropped the assertion; Checkpoint 6 now just
-        classifies each port to a face (still needed for Checkpoint 7b's
-        per-face survey), and Checkpoint 7b's physics-based open-area check is
-        the thing that actually validates stream/port wiring now. Revisit a real
-        placement rule once more real parts exist to generalize from.
-      - **Checkpoint 4's bbox-volume-% warning is a known false positive for
-        non-cuboid parts**: real enclosure is a tapering wedge/funnel, correctly
-        ~40% under its bounding-box volume by shape, not a winding bug -
-        confirmed by rendering `volume.stl` (clean closed wedge, matches the
-        painted groups). Left as a warning (non-blocking); worth tightening the
-        heuristic later if it gets noisy on more real parts.
-      - **Tessellation**: first export was coarse (972 tris) as the spec
-        predicted; user re-exported finer (2348 tris) before this became a real
-        problem. Rendered the body shell and a true membrane cross-section
-        afterward - clean, no facet-stepping artifacts.
-      - Real volume is ~2x a fixture's bbox (232 x 131 x 140mm) - membrane.stl
-        came out to 1.2GB at the 0.5mm dev voxel size. Relevant to the Session 2
-        resolution/export-format item below.
-- [ ] Headless/Linux build path (mentioned in spec's environment prerequisites)
-      is untested — this session was done on Windows.
+Status: Sessions 1–2 done. The pipeline (importer, port seals, normalized
+gyroid, skin, wall-thickness check; Checkpoints 0–9) runs end-to-end at 0.5mm
+on both cube fixtures and the real HRV volume. At 0.15mm, only the 100mm cube
+fits in memory. This file tracks what's left; completed work and
+its rationale live in the commit messages. Windows is the only supported build
+platform for now; the spec's headless/Linux path is out of scope.
 
 ## Session 2 — Real gyroid
 
-- [ ] Gradient normalization so wall thickness is uniform (current `GyroidStub.cs`
-      is explicitly the crude, un-normalized version called out in Task 7).
-- [ ] Verify wall thickness at several sample points against nominal
-      `Params.fWallThicknessMM`.
-- [ ] Exterior skin generation via erode-and-subtract (`Params.fSkinThicknessMM`
-      is defined but unused so far).
-- [ ] Drop dev voxel size from 0.5mm to 0.15mm (production) and measure
-      generation time + RAM — current 0.5mm membrane STL is already ~440MB per
-      100mm cube fixture and **1.2GB for the real HRV volume** (232x131x140mm),
-      so this needs a real look at export format/streaming before dropping
-      resolution 3x on top of that.
+- [x] Gradient normalization (`Gyroid.cs`): d/|∇d| plus one Newton step.
+      Wall is 0.799 ± 0.000mm along the normal for nominal 0.8 (the raw field
+      gave 0.60–0.73; first-order alone gave a uniform but 3.5%-thin 0.772).
+- [x] Wall-thickness check (Checkpoint 9): 200 random interior points,
+      measured on the analytic field and on the voxel core. Voxel core:
+      0.802 ± 0.009mm at 0.5mm voxels, 0.800 ± 0.001mm at 0.15mm (cube and real
+      volume). Enforced: mean within 2% of nominal, every sample within 5%.
+- [x] Exterior skin (Checkpoint 8): erode-and-subtract, with a port cut-out
+      that is pulled in 1.5mm from each port edge, so neighbouring faces keep
+      their skin up to the corner.
+- [x] Measured 0.15mm (see below). Pipeline now takes
+      `--voxel`, `--only`, `--export stl|vdb|none` (defaults unchanged: 0.5mm,
+      all parts, STL), and prints time and peak RAM for each stage.
+
+### 0.15mm results (Ryzen 7 5700U, 15GB RAM)
+
+| part | stage | time | peak RAM |
+|---|---|---|---|
+| 100mm cube | voxel stages + checks | 4.1 min | 3.95GB |
+| 100mm cube | meshing | 10.3 min | 8.96GB |
+| 100mm cube | write STL | 1.1 min | — |
+| real volume | voxel stages + checks | ~20 min | ~11GB working set, 18GB+ committed |
+
+- Cube: 95M triangles, **4.7GB STL** (437MB at 0.5mm). As a VDB grid it's
+  about 15× smaller than the STL (29MB vs 437MB at 0.5mm).
+- Real volume: **doesn't fit in 15GB.** The wall check passed (0.800 ±
+  0.001), but it then paged heavily and was stopped after 25+ minutes stuck in
+  export. Meshing it would need roughly 2.6× the cube's 9GB, and the STL would
+  be ~12GB. Whole-part production output isn't viable on this machine, so
+  Session 3's tiling is what makes 0.15mm possible, not an optimization.
 
 ## Session 3 — Modularization
 
 - [ ] 100mm module tiling with seam lip and gasket groove so a 200mm core
       becomes eight prints.
-- [ ] Solves memory, print risk, and leak-test cost simultaneously (per spec
-      rationale) — worth re-checking the 0.15mm RAM numbers from Session 2
-      against this before committing to a tile size.
+- [ ] Tile size: a 100mm cube at 0.15mm peaks at 9GB with STL export, so
+      100mm is the upper limit on this machine. Render each tile's implicit
+      separately. `voxIntersectImplicit` currently renders the gyroid over the
+      whole part's bbox at once.
+- [ ] Output format per tile: STL is ~4.7GB per 100mm tile. Options: keep
+      `.vdb` as the archived output and mesh on demand, write 3MF (indexed +
+      zipped), or decimate (voxel meshes of smooth TPMS are heavily
+      over-tessellated). Check what the target slicer accepts before choosing.
 
 ## Session 4 — Parameter sweep
 
@@ -113,13 +59,47 @@ fixtures, committed as `eae0856`. This file tracks what's left.
       instead of the `Params.cs` constants.
 - [ ] Generate the candidate set; export for slicing and mass/time estimation.
 
-## Known traps to keep watching (from spec section 6)
+## Open questions
 
-- ASCII STL loading isn't implemented in PicoGK (only binary loads) — not hit
-  yet since this session only *writes* STL, never reads one back in.
-- Onshape API returns meters, PicoGK is mm — only matters once/if a REST API
-  import path replaces the OBJ export path.
-- Don't let any code depend on exact Onshape export filenames (rev/part-number
-  prefixes) — current code takes the fixture path as an explicit argument, so
-  this is already fine, but keep it in mind if a directory-scan importer is
-  added later.
+- [ ] **Port placement rule.** `PortAssertion.cs`'s per-face role table was
+      dropped: it assumed one port per cardinal face, but the real enclosure
+      puts SupplyIn and ExhaustIn on the same `+Y` face. Checkpoint 7b's
+      open-area survey validates stream/port wiring for now. Revisit a real
+      placement rule once there are more real parts to generalize from.
+- [ ] **Checkpoint 4's >5% bbox-volume warning is a known false positive for
+      non-cuboid parts** — the real enclosure is a tapering wedge, correctly
+      ~40% under its bbox volume by shape, not a winding bug. Left non-blocking;
+      worth tightening the heuristic if it gets noisy on more real parts.
+- [ ] **Checkpoint 7b samples the whole bbox face, not the port patch.** On
+      the real volume, SupplyIn and ExhaustIn both sit on `+Y`, so they get
+      the same survey. Sampling each port group's own triangles (inset
+      inward) would test each port's actual opening.
+- [ ] **Report the PicoGK bug upstream:** `Voxels.IntersectImplicit` throws a
+      native `SEHException` at any voxel size ≤ ~0.33mm (2.3.0, the latest
+      release), even for a plain sphere. The pipeline works around it
+      (`voxIntersectImplicit` in `Program.cs`); drop the workaround once
+      it's fixed.
+
+## Known traps to keep watching (spec section 6)
+
+- **PicoGK point queries snap to the nearest voxel.** `Voxels.bIsInside` and
+  `ScalarField.bGetValue`/`fSignedDistance` err by up to ±0.67 voxel, and
+  `bRayCastToSurface` is biased about −0.11mm at 0.15mm. Any measurement uses
+  `TrilinearSdf` instead. `vecClosestPointOnSurface` is slower on bigger grids
+  (it made Checkpoint 9 take 15 min at 0.15mm), so keep it out of loops.
+- **Free PicoGK grids explicitly.** They live in native memory the GC can't
+  see.
+
+- **Port colors must match the palette exactly.** An off-palette port (e.g.
+  pure blue `(0,0,1)` for ExhaustIn) falls through to `None` and is silently
+  skipped — no slab, no stream, no placement info. Hit once already on the
+  first real export.
+- ASCII STL loading isn't implemented in PicoGK (binary loads only) — not hit
+  yet, since the pipeline only *writes* STL.
+- Onshape API returns meters, PicoGK is mm — only matters if a REST API import
+  path ever replaces the OBJ export path.
+- Don't let code depend on exact Onshape export filenames (rev/part-number
+  prefixes). Handled in two places so far: the fixture path is an explicit
+  argument, and `ObjImporter.cs` falls back to `<objname>.mtl` when the OBJ's
+  own `mtllib` line points at a stale export name. Keep it in mind if a
+  directory-scan importer is added.
