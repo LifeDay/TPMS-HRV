@@ -270,6 +270,7 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
         _      => "",
     };
 
+    string? strFailure = null;
     if (oOpts.strExport is "stl" or "3mf")
     {
         // The deviation check samples the core's SDF, which outlives the grid.
@@ -287,7 +288,12 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
 
         if (oCoreSdf != null)
         {
-            RunSurfaceDeviation("voxel mesh", oMesh, oCoreSdf);
+            fRunSurfaceDeviation("voxel mesh", oMesh, oCoreSdf);
+            // Check the marching-cubes mesh BEFORE decimating. Without this, a
+            // defect PicoGK handed us is indistinguishable from one the
+            // decimator introduced, and the decimator gets blamed for both.
+            (long nRawEdges, long nRawOpen, long nRawNM, long nRawDegen) = oMesh.oTopologyCheck();
+            Console.WriteLine($"  voxel mesh topology: {nRawEdges} edges, {nRawOpen} open, {nRawNM} non-manifold, {nRawDegen} degenerate");
             int nBefore = oMesh.nTriangles;
             double dRawVolume = oMesh.dSignedVolume();
             MeshDecimator.Decimate(oMesh, oOpts.fDecimateMM, fChunkMM: 30f, nThreads: Math.Max(1, Environment.ProcessorCount / 2));
@@ -299,12 +305,33 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
             double dMeshVolume = oMesh.dSignedVolume();
             Console.WriteLine($"  mesh volume: {dMeshVolume:F0} mm^3 ({100 * (dMeshVolume / dRawVolume - 1):+0.000;-0.000}% vs voxel mesh, " +
                               $"{100 * (dMeshVolume / fCoreVolumeMM3 - 1):+0.00;-0.00}% vs voxel count)");
+            // Measure before judging: a run that trips a hard check is exactly
+            // when the deviation figure matters most, so it must not be
+            // stranded behind the throw.
+            float fMaxDev = fRunSurfaceDeviation("decimated", oMesh, oCoreSdf);
+
+            // Checkpoint 9 measures the VOXEL core, which is then discarded -
+            // what prints is this mesh. Decimation moves the surface, and a
+            // wall only has half its thickness to give on each side before it
+            // perforates. Warn well before that: half of the half-thickness.
+            float fHalfWall = 0.5f * oOpts.fWallThicknessMM;
+            if (fMaxDev > 0.5f * fHalfWall)
+                Console.WriteLine($"  WARNING: max deviation {fMaxDev:F4}mm is {100f * fMaxDev / fHalfWall:F0}% of the wall's " +
+                                  $"{fHalfWall:F3}mm half-thickness - the printed wall is no longer within Checkpoint 9's tolerance. " +
+                                  $"Lower --decimate or raise --wall.");
+
             if (nOpen > 0 || nNonManifold > 0 || nDegenerate > 0)
-                throw new Exception("decimated mesh isn't a closed manifold");
-            if (dMeshVolume <= 0)
-                throw new Exception("decimated mesh winds inward");
-            RunSurfaceDeviation("decimated", oMesh, oCoreSdf);
+                strFailure = $"not a closed manifold ({nOpen} open, {nNonManifold} non-manifold, {nDegenerate} degenerate)";
+            else if (dMeshVolume <= 0)
+                strFailure = "winds inward";
         }
+
+        // A failing mesh still gets written, under a name that can't be mistaken
+        // for output: these runs cost double-digit minutes, and whether a defect
+        // actually matters is a question you answer by loading the thing.
+        if (strFailure != null)
+            strCorePath = Path.Combine(Path.GetDirectoryName(strCorePath)!,
+                                       Path.GetFileNameWithoutExtension(strCorePath) + ".FAILED" + Path.GetExtension(strCorePath));
 
         if (oOpts.strExport == "3mf")
             oMesh.SaveTo3mf(strCorePath);
@@ -325,6 +352,10 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
     }
 
     oTimer.Report();
+
+    // Thrown last, so the timings and the salvaged file are both on record.
+    if (strFailure != null)
+        throw new Exception($"[Checkpoint 10] decimated mesh {strFailure} - wrote {strCorePath} for inspection");
 }
 
 /// <summary>
@@ -470,7 +501,7 @@ static void RunWallThicknessCheck(Library oLib, GyroidField oField, Voxels voxCo
 /// centroids and edge midpoints (where flat triangles cut across a curved
 /// surface) of a random subset of triangles.
 /// </summary>
-static void RunSurfaceDeviation(string strLabel, IndexedMesh oMesh, TrilinearSdf oSdf)
+static float fRunSurfaceDeviation(string strLabel, IndexedMesh oMesh, TrilinearSdf oSdf)
 {
     const int nTriSamples = 200_000;
     var oRand = new Random(4321);
@@ -494,6 +525,7 @@ static void RunSurfaceDeviation(string strLabel, IndexedMesh oMesh, TrilinearSdf
     float fPct(double d) => afDev[(int)Math.Min(afDev.Count - 1, d * afDev.Count)];
     Console.WriteLine($"  surface deviation ({strLabel}, {afDev.Count} pts): mean {afDev.Average():F4}  " +
                       $"p99 {fPct(0.99):F4}  p99.9 {fPct(0.999):F4}  max {afDev[^1]:F4} mm");
+    return afDev[^1];
 }
 
 /// <summary>Largest t in [0, fMax] with bInside(t) still true, assuming bInside(0) and a single crossing.</summary>
