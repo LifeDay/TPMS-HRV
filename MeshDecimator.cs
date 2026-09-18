@@ -504,9 +504,19 @@ sealed class ChunkSimplifier
                         continue;
 
                     int i0 = t.v[j], i1 = t.v[(j + 1) % 3];
-                    if (aVerts[i1].bLocked)
-                        (i0, i1) = (i1, i0); // the locked end survives, in place
-                    if (aVerts[i1].bLocked)
+                    // Both ends must be chunk-local. Collapsing into a locked
+                    // survivor used to be allowed - it doesn't move, so the
+                    // geometry stays consistent across the seam - but the link
+                    // condition below can only see THIS chunk's triangles, and
+                    // a locked vertex has triangles in other chunks by
+                    // definition. If the survivor is adjacent to one of the
+                    // merged vertex's neighbours through a triangle we can't
+                    // see, the check passes on incomplete information and the
+                    // collapse creates a duplicate edge. That produced exactly
+                    // one non-manifold edge in 1.5M on the real part. The
+                    // half-shifted second pass unlocks these vertices and
+                    // simplifies the seams then, so little is given up.
+                    if (aVerts[i0].bLocked || aVerts[i1].bLocked)
                         continue;
 
                     dCollapseError(i0, i1, out Vector3D p);
