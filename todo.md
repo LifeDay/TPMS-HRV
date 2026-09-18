@@ -74,9 +74,64 @@ Tiling survives only as a way to fit 0.15mm in RAM.
       decimated size barely depends on voxel size (same ~11M triangles at 0.5
       and 0.25), so 0.15mm output should be about the same size again;
       only meshing RAM is the limit.
-- [ ] **Open `out/real_hrv_volume/core.3mf` (0.25mm) in Bambu Studio** and
-      check it loads, slices, and at what speed. That decides whether the 0.02mm
-      default tolerance needs loosening.
+- [x] **Sliced in Bambu Studio — it can't take 11M triangles.** The 0.25mm /
+      0.02mm-tolerance file stalls indefinitely; so does the 100mm cube at
+      4.2M. Slicer settings were not the cause (supports off, 0% infill).
+      Measured ceiling on the cube:
+
+      | cube file | triangles | slice |
+      |---|---|---|
+      | λ=12, tol 0.05 | 0.70M | ~3 min |
+      | λ=16, tol 0.02 | 0.99M | ~4 min |
+      | λ=12, tol 0.02 | 1.90M | wouldn't run |
+      | λ=8, tol 0.02 | 4.20M | very slow |
+      | λ=8, raw | 8.75M | hung |
+
+      **Budget: ~1M triangles.** Slice time is near-linear below it and falls
+      off a cliff above. Triangle count is what matters — the raw 8.7M mesh
+      is not pathological, just too big.
+
+- [x] **λ is the cheap lever: triangle count goes as 1/λ².** Measured on the
+      cube at tol 0.02: λ 8→12 gave 2.22× fewer (predicted 2.25×), 8→16 gave
+      4.26× (predicted 4×). Costs no geometric accuracy at all — the wall stays
+      at nominal, unlike loosening `--decimate`. It costs heat-exchange area,
+      which goes as 1/λ.
+
+- [x] **Real part now fits the budget**: `--cell 16 --decimate 0.05 --voxel
+      0.25` → 1,008,412 triangles, 14MB 3MF, topology clean, wall 0.800 ±
+      0.001mm, ports 42–45% open. Written to
+      `out/real_hrv_volume/real_cell16_tol0.05.3mf`. **Not yet sliced.**
+
+- [x] **Decimator bug, found and fixed.** It produced 1 non-manifold edge in
+      1.5M on the real part while PicoGK's raw mesh was clean (0 of 76.8M).
+      Cause: a collapse into a *locked* survivor was allowed, but
+      `bLinkConditionHolds` only sees the current chunk's triangles, and a
+      locked vertex has triangles in other chunks by definition — so the check
+      passed on incomplete information and created a duplicate edge. Now both
+      endpoints must be chunk-local; the half-shifted second pass still
+      simplifies the seams. Cost: ~1,000 triangles in 4.2M.
+
+- [ ] **Slice `real_cell16_tol0.05.3mf` to confirm the budget holds** on the
+      real part, not just the cube.
+
+- [ ] **Try OrcaSlicer / PrusaSlicer on `sweep_cell12_tol0.02.3mf` (1.90M).**
+      If the ~1M ceiling is Bambu-specific, we can go back to tol 0.02 (0.06mm
+      deviation, no wall thinning) and a smaller λ, recovering the
+      heat-exchange area λ=16 gives up. Highest-leverage open test.
+
+- [ ] **Decide whether λ=16 is thermally acceptable.** It halves heat-exchange
+      area vs λ=8 (roughly 75% → 60% effectiveness for counterflow), partly
+      offset by lower pressure drop and less fan power. Needs a real number,
+      not a guess — this is the design cost of printability.
+
+- [ ] 0.15mm on the real volume: meshing needs ~23GB at once. Options: mesh
+      the core in overlapping slabs and decimate each before the next (the
+      decimator already locks seam vertices, so pieces can be stitched), or
+      run on a machine with ≥32GB. Render the implicit per slab too —
+      `voxIntersectImplicit` currently renders the gyroid over the whole
+      part's bbox at once. **Lower priority now** — at λ=16 the 0.25mm output
+      is already at the slicer's limit, so finer voxels buy nothing
+      downstream.
 - [ ] 0.15mm on the real volume: meshing needs ~23GB at once. Options: mesh
       the core in overlapping slabs and decimate each before the next (the
       decimator already locks seam vertices, so pieces can be stitched), or
@@ -86,11 +141,32 @@ Tiling survives only as a way to fit 0.15mm in RAM.
 
 ## Session 4 — Parameter sweep
 
-- [ ] Drive λ (`fCellSizeMM`), wall thickness, and seal depth from a config file
-      instead of the `Params.cs` constants.
+- [x] λ, wall thickness and seal depth are now CLI flags (`--cell`, `--wall`,
+      `--seal`) rather than `Params.cs` constants. Pulled forward from this
+      session because the slicer limit forced a λ sweep. `--seal` defaults to
+      0.75 × `--cell` instead of a hardcoded 6.0mm — that constant was
+      documented as ~0.75λ and would have silently under-sealed the ports at
+      any other λ. At λ=8 it still evaluates to exactly 6.0, so old output is
+      unchanged. A config file is still worth doing if the flag list grows.
 - [ ] Generate the candidate set; export for slicing and mass/time estimation.
 
 ## Open questions
+
+- [ ] **Checkpoint 9 verifies the wrong object.** It measures wall thickness on
+      the *voxel core*, which is then discarded; what prints is the decimated
+      mesh. At `--decimate 0.05` the mesh deviates up to 0.27–0.35mm from the
+      SDF (the max is a noisy tail statistic, varying run to run at fixed
+      mean/p99.9), which is 68–88% of the 0.8mm wall's 0.4mm half-thickness.
+      Nothing perforated, but the ±5% wall guarantee Session 2 built does not
+      survive export. Checkpoint 10 now *warns* when max deviation exceeds half
+      the half-thickness; the real fix is to re-run the normal-ray measurement
+      against the decimated mesh, which needs a mesh ray cast rather than the
+      SDF sampling used today.
+- [ ] **Deviation does not improve with voxel size at loose tolerances.** Going
+      0.5mm → 0.25mm voxels cut the *raw* mesh's max deviation from 0.196 to
+      0.106mm, but the decimated figure at tol 0.05 stayed put (0.316 → 0.352).
+      Above ~0.05mm the decimation error dominates and finer voxels buy
+      nothing. Don't reach for a smaller voxel to fix a tolerance problem.
 
 - [ ] **Port placement rule.** `PortAssertion.cs`'s per-face role table was
       dropped: it assumed one port per cardinal face, but the real enclosure
