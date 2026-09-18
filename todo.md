@@ -129,12 +129,32 @@ Tiling survives only as a way to fit 0.15mm in RAM.
       unmeasured, so tol 0.02 (0.06mm deviation instead of 0.35, no wall
       thinning) and a smaller λ are both back on the table.
 
-- [ ] **Find Orca's actual ceiling** — `sweep_cell8_tol0.02.3mf` (4.20M),
-      `sweep_cell8_RAW.3mf` (8.75M). Bambu called 4.20M "very slow" and hung on
-      8.75M. **Low priority now:** the thermal model below rules λ=8 out on its
-      own (it chokes the 140mm fans), so the only λ we need to slice is 12,
-      which Orca already does in 5 min. Worth knowing only if the envelope
-      grows.
+- [x] **Triangle count scales with surface area, so cube results do not
+      transfer to the real part.** Count ∝ V/λ at fixed tolerance; measured
+      density at tol 0.02 is 4.20 M/L on the cube vs 4.35 M/L on the real part
+      (3.6%), so the 2.559 L real part carries ~2.6× the 1 L cube's triangles
+      at the same settings. Projections for the real part:
+
+      | setting | cube (1.0 L) | real (2.559 L) |
+      |---|---|---|
+      | λ=12, tol 0.02 | 1.90M ✓ Orca 5 min | ~5.0M — untested |
+      | λ=12, tol 0.05 | 0.70M | **~1.87M** — at Orca's verified point |
+      | λ=16, tol 0.02 | 0.99M | ~2.6M — untested |
+      | λ=16, tol 0.05 | — | 1.01M ✓ Bambu 10 min |
+
+      **The 1.90M Orca result was the cube, not the real part.** The real
+      part's Orca-safe λ=12 recipe is tol 0.05, not tol 0.02.
+
+- [ ] **Find Orca's ceiling above 1.9M** — slice `sweep_cell8_tol0.02.3mf`
+      (4.20M). Not about λ=8, which the thermal model rules out anyway: 4.2M is
+      the same ballpark as the real part at λ=12 / tol 0.02 (~5.0M), so this is
+      the test that decides whether the thermal optimum can also have the good
+      0.06mm surface deviation instead of tol 0.05's 0.35mm. Bambu called 4.20M
+      "very slow" and hung on 8.75M (`sweep_cell8_RAW.3mf`).
+
+- [ ] **If the fan upgrade goes ahead, export the real part at `--cell 10
+      --decimate 0.05`** (~2.2M triangles projected) and slice it in Orca. Not
+      needed for the λ=16 baseline, which is already exported.
 
 - [x] **λ=16 is thermally defensible but λ=12 is the right point.** Modelled
       counterflow ε–NTU on the measured geometry (envelope 2.559 L from
@@ -160,10 +180,10 @@ Tiling survives only as a way to fit 0.15mm in RAM.
       | 12 | 42 m³/h | 47% | **0.131 kW** |
       | 16 | 65 m³/h | 28% | 0.124 kW |
 
-      λ=8 chokes itself — great ε, no ventilation. λ=16 costs only ~5% of the
-      recovered heat vs the optimum, so it is *acceptable*; λ=12 is better and
-      OrcaSlicer already slices it (1.90M, 5 min). **Recipe: `--cell 12
-      --decimate 0.02`, sliced in Orca.**
+      λ=8 chokes itself — great ε, no ventilation. That ranking assumes flow
+      is free to vary; once the ventilation target below fixes it, the choice
+      changes to λ=16. Kept here because it is the right analysis for a
+      flow-unconstrained design.
 
       Model is `analysis/thermal.py` (no dependencies; `--measure` re-derives
       the geometry constants from `out/`, which needs numpy).
@@ -175,18 +195,55 @@ Tiling survives only as a way to fit 0.15mm in RAM.
       from correlations, not measurements — firm them up with a rig or CFD
       before committing to a final λ.
 
-- [ ] **The core is area-starved for whole-house duty — decide the ventilation
-      target.** 80% effectiveness needs 2.2–6.6 m² depending on flow, i.e.
-      2–7× even the λ=8 core; 2.5 L is simply a small exchanger (a 3mm plate
-      core in the same envelope would give ~1.4 m², so this is a volume limit,
-      not a gyroid limit). At 42 m³/h and 47% the current design is a
-      single-room unit, not a house HRV. Either accept that, or grow the
-      envelope — which conflicts with printing in one piece on the H2C.
+- [x] **Ventilation target: one room, 2 occupants → ~52 m³/h.** Sized on
+      steady-state CO₂ (15 L/h per sedentary adult, 420 ppm outdoors), which is
+      a sharper criterion than a standards table and is independent of room
+      volume: 31 m³/h holds 1400 ppm, 44 holds 1100, 52 holds 1000, 63 holds
+      900. `analysis/thermal.py --sizing`. The whole-house worry is moot — the
+      2.5 L envelope is adequate for this duty, so no envelope growth, and the
+      slab-meshing item stays low priority.
 
-- [ ] **Fan choice is worth more than λ.** Swapping the 140mm case fans for
-      high-static 140s (~100 Pa) roughly doubles recovered heat (0.13 → 0.29 kW)
-      and moves the optimum to λ≈10. Measure the real core Δp before buying
-      fans — the model's friction factor is the second-biggest uncertainty.
+- [x] **Flow being a requirement changes the objective, and the answer.** With
+      flow free, maximising ε × flow favoured λ=12. With flow fixed at the
+      target, the right choice is the *smallest λ that still reaches it*, and
+      the friction unknown (K = 1.0–2.5) decides between them. Fans flat out:
+
+      | λ | Q at K=1.0 / 1.5 / 2.5 | CO₂ | verdict |
+      |---|---|---|---|
+      | 12 | 55 / 42 / 29 m³/h | 970–1474 ppm | fails pessimistic |
+      | 14 | 68 / 54 / 39 m³/h | 860–1198 ppm | marginal pessimistic |
+      | 16 | 80 / 65 / 48 m³/h | 797–1042 ppm | **ok across the band** |
+
+      **λ=16 is the answer on the stated fans** — the only cell size that holds
+      under 1100 ppm even if friction is 2.5× smooth-duct. Under-ventilating is
+      a real failure; over-ventilating only costs a little ε. λ=16 delivers
+      48–80 m³/h at 24–35% ε, about 109 W recovered at ΔT=20K.
+
+      **`out/real_hrv_volume/real_cell16_tol0.05.3mf` is therefore the right
+      part, and it already exists and slices** (1.01M triangles, ~10 min in
+      Bambu Studio). The λ=12 export below is no longer needed for the baseline
+      build. Note the irony: λ=16, adopted under protest because of the slicer,
+      is independently the correct choice for this duty.
+
+- [ ] **Optional upgrade: high-static fans buy a finer λ, not more flow.** At
+      the fixed 52 m³/h target, more static pressure lets a denser core run at
+      the same flow — which is where the recovered heat is:
+
+      | λ | core Δp (K=1.0–2.5) | ε | recovered | fan |
+      |---|---|---|---|---|
+      | 16 | 6–14 Pa | 28–34% | 109 W | case fans fine |
+      | 12 | 12–29 Pa | 42–44% | 149 W | high-static |
+      | 10 | 19–48 Pa | 51–52% | 178 W | high-static |
+      | 8 | 39–98 Pa | 60–63% | 215 W | high-static |
+
+      λ=10 at ~52 m³/h would recover **1.6× the heat** of the λ=16 baseline.
+      Costs: high-static 140s PWM-throttled to the target (not run flat out),
+      and a new export — λ=10 projects to ~2.2M triangles at tol 0.05, just
+      above Orca's verified 1.9M. λ=8 is the thermal ceiling at 215 W but
+      ~4.1M triangles, so it depends on the Orca ceiling test.
+
+      Measure the real core Δp before buying anything — friction is the model's
+      second-biggest unknown and it spans a 2.5× flow range here.
 
 - [ ] 0.15mm on the real volume: meshing needs ~23GB at once. Options: mesh
       the core in overlapping slabs and decimate each before the next (the

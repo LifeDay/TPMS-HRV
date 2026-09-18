@@ -17,7 +17,7 @@ Nusselt bracket is the dominant uncertainty (~+/-1.7x on effectiveness at
 lambda=16) and the friction factor is second. Treat the ranking of lambda as
 robust and the absolute numbers as provisional until there is a rig or CFD.
 
-Usage:  python analysis/thermal.py [--measure]
+Usage:  python analysis/thermal.py [--sizing | --measure]
 """
 import sys
 
@@ -159,6 +159,67 @@ def report():
                   f"-> {need / geom(8)['a_mid']:.1f}x the lambda=8 core")
 
 
+# --- sizing for the actual application: one room, 2 occupants ----------------
+CO2_PER_PERSON = 15.0       # L/h, sedentary / sleeping adult at ~1.0-1.2 met
+OCCUPANTS      = 2
+CO2_OUTDOOR    = 420.0      # ppm
+CO2_LIMIT      = 1100.0     # ppm, upper bound for sleeping comfort
+
+
+def flow_for_co2(ppm):
+    """Steady-state flow to hold a CO2 level. Room volume does not enter."""
+    return CO2_PER_PERSON * OCCUPANTS * 1e3 / (ppm - CO2_OUTDOOR) / 3600.0
+
+
+def co2_at(q):
+    return CO2_OUTDOOR + (CO2_PER_PERSON * OCCUPANTS / cmh(q)) * 1e3
+
+
+def sizing():
+    """Flow is a requirement, not a free variable, so the objective changes:
+    take the smallest lambda that still meets the target flow."""
+    print('=== flow needed for 2 occupants ===')
+    for ppm in (1400, 1100, 1000, 900):
+        print(f'  hold {ppm:>4} ppm -> {cmh(flow_for_co2(ppm)):>5.1f} m3/h')
+
+    print()
+    print('=== fans flat out: what each lambda delivers ===')
+    print('    K is the friction unknown: 1.0 optimistic, 2.5 pessimistic')
+    q_max, dp_max = FANS['140mm case fan (NF-A14 class)']
+    for lam in (10, 12, 14, 16, 20):
+        g = geom(lam)
+        print()
+        print(f'  lambda = {lam}mm  (area {g["a_mid"]:.2f} m2, '
+              f'Dh {g["dh"] * 1e3:.1f}mm)')
+        print(f"    {'K':>4} {'Q m3/h':>8} {'CO2':>6} {'eff':>14} verdict")
+        for k in (1.0, 1.5, 2.5):
+            q = operating_point(g, q_max, dp_max, k)
+            ppm = co2_at(q)
+            e1 = effectiveness(g, q, 'floor')[0]
+            e2 = effectiveness(g, q, 'tpms')[0]
+            verdict = ('ok' if ppm <= CO2_LIMIT
+                       else 'marginal' if ppm <= 1400 else 'FAILS')
+            print(f"    {k:>4.1f} {cmh(q):>8.1f} {ppm:>6.0f} "
+                  f"{e1:>5.0%}-{e2:<8.0%} {verdict}")
+
+    target = flow_for_co2(1000)
+    print()
+    print(f'=== hold flow at {cmh(target):.0f} m3/h and let lambda set eff ===')
+    print('    a higher-static fan buys a FINER lambda at the same flow,')
+    print('    not more flow -- more flow is not wanted here')
+    print(f"{'lam':>5} {'K':>4} {'dP Pa':>7} {'eff':>14} {'W at dT=20K':>12}  fan")
+    for lam in (8, 10, 12, 14, 16):
+        g = geom(lam)
+        for k in (1.0, 1.5, 2.5):
+            dp = core_dp(g, target, k)[0]
+            e1 = effectiveness(g, target, 'floor')[0]
+            e2 = effectiveness(g, target, 'tpms')[0]
+            w = 0.5 * (e1 + e2) * RHO * target * CP * 20.0
+            fan = 'case fan ok' if dp <= 18 else 'needs high-static'
+            print(f"{lam:>5} {k:>4.1f} {dp:>7.1f} {e1:>5.0%}-{e2:<8.0%} "
+                  f"{w:>12.0f}  {fan}")
+
+
 def measure():
     """Re-derive the geometry constants from the pipeline's exports."""
     import re as _re
@@ -207,5 +268,7 @@ def measure():
 if __name__ == '__main__':
     if '--measure' in sys.argv:
         measure()
+    elif '--sizing' in sys.argv:
+        sizing()
     else:
         report()
