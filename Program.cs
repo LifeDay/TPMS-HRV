@@ -9,6 +9,12 @@ using TpmsHrv;
 //   --only    run only parts whose OBJ path contains <name> (repeatable)
 //   --export  core output format: stl (default), 3mf, vdb, or none to skip it
 //   --decimate  stl/3mf surface tolerance in mm (default 0.02); 0 keeps the raw voxel mesh
+//   --cell    gyroid lambda in mm (default Params.fCellSizeMM). Triangle count
+//             scales as 1/lambda^2, so this is the cheapest way to cut slicer
+//             load without touching wall accuracy - it costs heat-exchange area
+//   --wall    membrane thickness in mm (default Params.fWallThicknessMM)
+//   --seal    port seal depth in mm (default 0.75 * --cell, which is where
+//             Params.fPortSealDepthMM's 6.0 came from at the 8mm default)
 Options oOpts = Options.oParse(args);
 
 // Headless Library (no viewer, no blocking on a window close) - checkpoints
@@ -127,7 +133,7 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
         if (oPortByGroup[g] == EPort.None)
             continue;
 
-        Voxels voxSlab = SlabBuilder.voxSlabFromGroup(oLib, g, Params.fPortSealDepthMM);
+        Voxels voxSlab = SlabBuilder.voxSlabFromGroup(oLib, g, oOpts.fSealDepth);
         oSlabByGroup[g] = voxSlab;
         voxSlab.mshAsMesh().SaveToStlFile(Path.Combine(strOutDir, $"slab_{strSanitize(g.strName)}.stl"));
     }
@@ -155,8 +161,8 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
     oTimer.Mark("port slabs");
 
     // ---- Task 7: gyroid membrane + port seals ----
-    var oField = new GyroidField(Params.fCellSizeMM);
-    Voxels voxCore = voxIntersectImplicit(oLib, voxVolume, new GyroidSheetImplicit(oField, Params.fWallThicknessMM));
+    var oField = new GyroidField(oOpts.fCellSizeMM);
+    Voxels voxCore = voxIntersectImplicit(oLib, voxVolume, new GyroidSheetImplicit(oField, oOpts.fWallThicknessMM));
     oTimer.Mark("membrane");
 
     // Supply* <-> stream A, Exhaust* <-> stream B. Which of the gyroid's two
@@ -176,8 +182,8 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
     {
         EPort ePort = oPortByGroup[g];
         IImplicit xOtherStream = (ePort is EPort.SupplyIn or EPort.SupplyOut)
-            ? new GyroidStreamBImplicit(oField, Params.fWallThicknessMM)
-            : new GyroidStreamAImplicit(oField, Params.fWallThicknessMM);
+            ? new GyroidStreamBImplicit(oField, oOpts.fWallThicknessMM)
+            : new GyroidStreamAImplicit(oField, oOpts.fWallThicknessMM);
 
         using Voxels voxSlabInVolume = voxSlab.voxBoolIntersect(voxVolume);
         using Voxels voxSeal = voxIntersectImplicit(oLib, voxSlabInVolume, xOtherStream);
@@ -192,7 +198,7 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
     // face gets a healthy mix of both by construction (the whole face is the
     // "port"); its job is to catch a port that gyroid phase leaves sitting
     // entirely on membrane.
-    float fHalfThicknessMM = 0.5f * Params.fWallThicknessMM;
+    float fHalfThicknessMM = 0.5f * oOpts.fWallThicknessMM;
     foreach (ObjGroup g in oGroups)
     {
         EPort ePort = oPortByGroup[g];
@@ -242,7 +248,7 @@ static void RunSession(Library oLib, Options oOpts, string strObjPath, string st
 
     // ---- Task 9: wall thickness vs nominal ----
     RunWallThicknessCheck(oLib, oField, voxCore, voxVolume, oSlabByGroup.Values.Concat(oCutByGroup.Values).ToList(),
-                          oBBoxVolume, fSkinMM, oOpts.fVoxelSizeMM);
+                          oBBoxVolume, fSkinMM, oOpts.fVoxelSizeMM, oOpts.fWallThicknessMM);
     oTimer.Mark("checks");
 
     // Everything but the core is done with. PicoGK grids live in native
@@ -380,10 +386,10 @@ static void RunSkinCheck(List<ObjGroup> oGroups, Dictionary<ObjGroup, EPort> oPo
 /// (trilinear SDF), which is what actually gets meshed and printed.
 /// </summary>
 static void RunWallThicknessCheck(Library oLib, GyroidField oField, Voxels voxCore, Voxels voxVolume, List<Voxels> avoxExclude,
-                                  BBox3 oBBox, float fSkinMM, float fVoxelSizeMM)
+                                  BBox3 oBBox, float fSkinMM, float fVoxelSizeMM, float fWallMM)
 {
     const int nSamples = 200;
-    float fNominal = Params.fWallThicknessMM;
+    float fNominal = fWallMM;
     float fReach = fNominal; // bisection bracket either side of the mid-surface
     float fClearance = fSkinMM + fNominal + 2f * fVoxelSizeMM;
 
@@ -583,6 +589,12 @@ sealed class Options
     public List<string> astrOnly = new();
     public string strExport = "stl";
     public float fDecimateMM = 0.02f;
+    public float fCellSizeMM = Params.fCellSizeMM;
+    public float fWallThicknessMM = Params.fWallThicknessMM;
+    // Null until resolved in oParse: the seal depth is defined relative to
+    // lambda (~0.75*lambda), so it has to track --cell unless given outright.
+    public float? fSealDepthMM = null;
+    public float fSealDepth => fSealDepthMM ?? 0.75f * fCellSizeMM;
 
     public static Options oParse(string[] astrArgs)
     {
@@ -597,12 +609,21 @@ sealed class Options
                 case "--only":   o.astrOnly.Add(strNext()); break;
                 case "--export": o.strExport = strNext(); break;
                 case "--decimate": o.fDecimateMM = float.Parse(strNext(), CultureInfo.InvariantCulture); break;
+                case "--cell":   o.fCellSizeMM = float.Parse(strNext(), CultureInfo.InvariantCulture); break;
+                case "--wall":   o.fWallThicknessMM = float.Parse(strNext(), CultureInfo.InvariantCulture); break;
+                case "--seal":   o.fSealDepthMM = float.Parse(strNext(), CultureInfo.InvariantCulture); break;
                 default: throw new ArgumentException($"unknown argument {strArg}");
             }
         }
 
         if (o.strExport is not ("stl" or "3mf" or "vdb" or "none"))
             throw new ArgumentException($"--export must be stl, 3mf, vdb or none (got {o.strExport})");
+        if (o.fCellSizeMM <= 0)
+            throw new ArgumentException($"--cell must be positive (got {o.fCellSizeMM})");
+        // The seal depth is ~0.75*lambda by design, so a cell bigger than the
+        // slab is a silent mis-seal rather than an error. Catch it here.
+        if (o.fWallThicknessMM <= 0 || o.fWallThicknessMM >= 0.5f * o.fCellSizeMM)
+            throw new ArgumentException($"--wall must be >0 and well under half --cell (got {o.fWallThicknessMM} vs cell {o.fCellSizeMM})");
         return o;
     }
 }

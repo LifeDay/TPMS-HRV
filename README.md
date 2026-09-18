@@ -66,7 +66,8 @@ throws and stops the run:
 ## Usage
 
 ```sh
-dotnet run -c Release -- [--voxel <mm>] [--only <name>]... [--export stl|3mf|vdb|none] [--decimate <mm>]
+dotnet run -c Release -- [--voxel <mm>] [--only <name>]... [--export stl|3mf|vdb|none]
+                          [--decimate <mm>] [--cell <mm>] [--wall <mm>] [--seal <mm>]
 ```
 
 | Option | Default | Meaning |
@@ -75,6 +76,24 @@ dotnet run -c Release -- [--voxel <mm>] [--only <name>]... [--export stl|3mf|vdb
 | `--only` | all parts | Run only parts whose OBJ path contains `<name>`. Repeatable |
 | `--export` | `stl` | Core output: `stl`, `3mf`, `vdb`, or `none` |
 | `--decimate` | `0.02` | STL/3MF surface tolerance in mm. `0` keeps the raw voxel mesh |
+| `--cell` | `8.0` | Gyroid wavelength λ in mm |
+| `--wall` | `0.8` | Membrane thickness in mm |
+| `--seal` | `0.75 × --cell` | Port seal depth in mm |
+
+`--cell` is the main lever on output size: triangle count scales as **1/λ²**,
+and unlike `--decimate` it costs no geometric accuracy — the wall stays at
+nominal thickness. What it costs is heat-exchange area, which scales as 1/λ.
+Measured on the 100mm cube at `--decimate 0.02`: λ 8→12 gave 2.22× fewer
+triangles, λ 8→16 gave 4.26×.
+
+Slicers have a practical ceiling on triangle count. Bambu Studio stalls
+indefinitely above roughly 1M triangles on this geometry, regardless of
+support and infill settings, so the real volume needs `--cell 16` to export
+something sliceable:
+
+```sh
+dotnet run -c Release -- --only real --voxel 0.25 --export 3mf --cell 16 --decimate 0.05
+```
 
 To build the real enclosure for Bambu Studio:
 
