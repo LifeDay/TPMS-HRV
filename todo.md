@@ -7,8 +7,11 @@ cube fixtures and the real HRV volume, and on the real volume at 0.25mm. At
 0.15mm, only the 100mm cube fits in memory.
 
 Target: Bambu Studio, printed in one piece on a Bambu H2C (the real
-volume is 232 × 131 × 140mm). This file tracks what's left; completed work and
-its rationale live in the commit messages. Windows is the only supported build
+volume is 232 × 131 × 140mm). Known-good recipe: `--cell 16 --decimate 0.05
+--voxel 0.25 --export 3mf`, 1.0M triangles, ~10 min to slice in Bambu Studio.
+OrcaSlicer handles at least 1.9M, so that recipe is a floor, not the target —
+see Session 3. This file tracks what's left; completed work and its rationale
+live in the commit messages. Windows is the only supported build
 platform for now; the spec's headless/Linux path is out of scope.
 
 ## Session 2 — Real gyroid
@@ -87,7 +90,8 @@ Tiling survives only as a way to fit 0.15mm in RAM.
       | λ=8, tol 0.02 | 4.20M | very slow |
       | λ=8, raw | 8.75M | hung |
 
-      **Budget: ~1M triangles.** Slice time is near-linear below it and falls
+      **Budget: ~1M triangles in Bambu Studio** (later found to be
+      Bambu-specific — see below). Slice time is near-linear below it and falls
       off a cliff above. Triangle count is what matters — the raw 8.7M mesh
       is not pathological, just too big.
 
@@ -111,18 +115,78 @@ Tiling survives only as a way to fit 0.15mm in RAM.
       endpoints must be chunk-local; the half-shifted second pass still
       simplifies the seams. Cost: ~1,000 triangles in 4.2M.
 
-- [ ] **Slice `real_cell16_tol0.05.3mf` to confirm the budget holds** on the
-      real part, not just the cube.
+- [x] **Budget confirmed on the real part.** `real_cell16_tol0.05.3mf`
+      (1,008,412 triangles) sliced in Bambu Studio in ~10 min — slow but
+      acceptable. The ~1M budget measured on the cube transfers to the real
+      part.
 
-- [ ] **Try OrcaSlicer / PrusaSlicer on `sweep_cell12_tol0.02.3mf` (1.90M).**
-      If the ~1M ceiling is Bambu-specific, we can go back to tol 0.02 (0.06mm
-      deviation, no wall thinning) and a smaller λ, recovering the
-      heat-exchange area λ=16 gives up. Highest-leverage open test.
+- [x] **The ~1M ceiling is Bambu-specific.** OrcaSlicer shows the same
+      high-triangle-count warning at ~1M but slices straight through it:
+      `sweep_cell12_tol0.02.3mf` (1.90M) in ~5 min, where Bambu Studio needs
+      ~10 min for 1.0M and wouldn't run 1.90M at all. The warning is cosmetic;
+      Bambu's cliff is not. **Treat the ~1M budget as a Bambu Studio number
+      only.** On Orca the budget is at least 1.9M and the real limit is
+      unmeasured, so tol 0.02 (0.06mm deviation instead of 0.35, no wall
+      thinning) and a smaller λ are both back on the table.
 
-- [ ] **Decide whether λ=16 is thermally acceptable.** It halves heat-exchange
-      area vs λ=8 (roughly 75% → 60% effectiveness for counterflow), partly
-      offset by lower pressure drop and less fan power. Needs a real number,
-      not a guess — this is the design cost of printability.
+- [ ] **Find Orca's actual ceiling** — `sweep_cell8_tol0.02.3mf` (4.20M),
+      `sweep_cell8_RAW.3mf` (8.75M). Bambu called 4.20M "very slow" and hung on
+      8.75M. **Low priority now:** the thermal model below rules λ=8 out on its
+      own (it chokes the 140mm fans), so the only λ we need to slice is 12,
+      which Orca already does in 5 min. Worth knowing only if the envelope
+      grows.
+
+- [x] **λ=16 is thermally defensible but λ=12 is the right point.** Modelled
+      counterflow ε–NTU on the measured geometry (envelope 2.559 L from
+      `volume.stl`'s signed volume; gyroid midsurface area 3.091/λ per unit
+      volume, validated against the λ=16 3MF — predicted 1.09 m² total wetted
+      vs 1.094 m² measured). **The earlier 75% → 60% guess was much too
+      optimistic.**
+
+      | λ | exchange area | porosity | Dₕ | ε at 100 m³/h/stream |
+      |---|---|---|---|---|
+      | 8 | 0.99 m² | 0.61 | 3.0mm | 47–54% |
+      | 12 | 0.66 m² | 0.72 | 5.0mm | 27–39% |
+      | 16 | 0.49 m² | 0.77 | 7.0mm | 17–29% |
+
+      With **2× 140mm case fans** (one per stream, ~140 m³/h free air, ~20 Pa
+      static) the *fan*, not λ, sets the operating point, and λ trades flow
+      against ε. Maximising recovered heat (ε × flow, the figure that matters)
+      at ΔT=20K:
+
+      | λ | Q | ε | recovered |
+      |---|---|---|---|
+      | 8 | 16 m³/h | 78% | 0.082 kW |
+      | 12 | 42 m³/h | 47% | **0.131 kW** |
+      | 16 | 65 m³/h | 28% | 0.124 kW |
+
+      λ=8 chokes itself — great ε, no ventilation. λ=16 costs only ~5% of the
+      recovered heat vs the optimum, so it is *acceptable*; λ=12 is better and
+      OrcaSlicer already slices it (1.90M, 5 min). **Recipe: `--cell 12
+      --decimate 0.02`, sliced in Orca.**
+
+      Model is `analysis/thermal.py` (no dependencies; `--measure` re-derives
+      the geometry constants from `out/`, which needs numpy).
+      Assumptions, in order of how much they move the answer: Nu between
+      8 (developing laminar, no enhancement) and 0.1·Re^0.7·Pr^(1/3) (TPMS fit
+      with secondary flows) — this is the widest band, roughly ±1.7× on ε at
+      λ=16; Darcy f·Re = 64·1.5 for tortuosity; k_wall = 0.20 W/mK (PETG); core
+      pressure drop only, no ducting or filter. The ε figures are estimates
+      from correlations, not measurements — firm them up with a rig or CFD
+      before committing to a final λ.
+
+- [ ] **The core is area-starved for whole-house duty — decide the ventilation
+      target.** 80% effectiveness needs 2.2–6.6 m² depending on flow, i.e.
+      2–7× even the λ=8 core; 2.5 L is simply a small exchanger (a 3mm plate
+      core in the same envelope would give ~1.4 m², so this is a volume limit,
+      not a gyroid limit). At 42 m³/h and 47% the current design is a
+      single-room unit, not a house HRV. Either accept that, or grow the
+      envelope — which conflicts with printing in one piece on the H2C.
+
+- [ ] **Fan choice is worth more than λ.** Swapping the 140mm case fans for
+      high-static 140s (~100 Pa) roughly doubles recovered heat (0.13 → 0.29 kW)
+      and moves the optimum to λ≈10. Measure the real core Δp before buying
+      fans — the model's friction factor is the second-biggest uncertainty.
 
 - [ ] 0.15mm on the real volume: meshing needs ~23GB at once. Options: mesh
       the core in overlapping slabs and decimate each before the next (the
@@ -132,12 +196,6 @@ Tiling survives only as a way to fit 0.15mm in RAM.
       part's bbox at once. **Lower priority now** — at λ=16 the 0.25mm output
       is already at the slicer's limit, so finer voxels buy nothing
       downstream.
-- [ ] 0.15mm on the real volume: meshing needs ~23GB at once. Options: mesh
-      the core in overlapping slabs and decimate each before the next (the
-      decimator already locks seam vertices, so pieces can be stitched), or
-      run on a machine with ≥32GB. Render the implicit per slab too —
-      `voxIntersectImplicit` currently renders the gyroid over the whole
-      part's bbox at once.
 
 ## Session 4 — Parameter sweep
 
